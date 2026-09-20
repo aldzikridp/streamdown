@@ -5,7 +5,7 @@ import os,      sys
 import select
 
 if os.name != 'nt':
-    import pty, termios, tty
+    import fcntl, pty, signal, termios, tty
 
 import math
 import re
@@ -1331,11 +1331,27 @@ def main():
     logging.basicConfig(stream=sys.stdout, level=args.loglevel.upper(), format=f'%(message)s')
     if os.name != 'nt':
         state.exec_master, state.exec_slave = pty.openpty()
+
+        def sync_winsize(*_):
+            # A fresh pty has a 0x0 window size, which makes line editors
+            # (readline, click, prompt_toolkit) fall back to 80 columns and
+            # desync their cursor maths once the input line passes that width,
+            # so typing at the line end looks jumbled. Copy the real size over.
+            try:
+                winsize = fcntl.ioctl(sys.stdin.fileno(), termios.TIOCGWINSZ, b'\0' * 8)
+                fcntl.ioctl(state.exec_master, termios.TIOCSWINSZ, winsize)
+                if state.exec_sub:
+                    os.kill(state.exec_sub.pid, signal.SIGWINCH)
+            except OSError:
+                pass
+
     try:
         inp = sys.stdin
         if args.exec and os.name != 'nt':
             state.terminal = termios.tcgetattr(sys.stdin)
             state.is_exec = True
+            sync_winsize()
+            signal.signal(signal.SIGWINCH, sync_winsize)
             state.exec_sub = subprocess.Popen(args.exec.split(' '), stdin=state.exec_slave, stdout=state.exec_slave, stderr=state.exec_slave, close_fds=True)
             os.close(state.exec_slave)  # We don't need slave in parent
             # Set stdin to raw mode so we don't need to press enter
